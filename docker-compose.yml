@@ -38,8 +38,57 @@ services:
       - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./docker/nginx/conf.d:/etc/nginx/conf.d:ro
 
+  db-worker1:
+    image: citusdata/citus:12.1
+    platform: linux/amd64
+    container_name: symfony_db_worker1
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: app
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+    ports:
+      - "5433:5432"
+    volumes:
+      - db-worker1-data:/var/lib/postgresql/data:rw
+      - ./docker/postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      - ./docker/postgres/init-worker.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    command: >
+      postgres -c config_file=/etc/postgresql/postgresql.conf
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB -h 127.0.0.1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  db-worker2:
+    image: citusdata/citus:12.1
+    platform: linux/amd64
+    container_name: symfony_db_worker2
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: app
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+    ports:
+      - "5434:5432"
+    volumes:
+      - db-worker2-data:/var/lib/postgresql/data:rw
+      - ./docker/postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      - ./docker/postgres/init-worker.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    command: >
+      postgres -c config_file=/etc/postgresql/postgresql.conf
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB -h 127.0.0.1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
   db:
-    image: postgres:16-alpine
+    image: citusdata/citus:12.1
+    platform: linux/amd64
     container_name: symfony_db
     restart: unless-stopped
     environment:
@@ -55,6 +104,11 @@ services:
       - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     command: >
       postgres -c config_file=/etc/postgresql/postgresql.conf
+    depends_on:
+      db-worker1:
+        condition: service_healthy
+      db-worker2:
+        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB -h 127.0.0.1"]
       interval: 10s
@@ -188,4 +242,6 @@ services:
 
 volumes:
   db-data:
+  db-worker1-data:
+  db-worker2-data:
   loki-data:

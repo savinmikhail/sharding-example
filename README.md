@@ -4,7 +4,7 @@ This repository is a **template** for Symfony 7.3 API services running in Docker
 
 - PHP‑FPM 8.4 (Alpine) with Symfony 7.3 (API‑only skeleton)
 - Nginx as HTTP entrypoint
-- PostgreSQL 16
+- Citus (PostgreSQL‑based sharding)
 - Redis
 - RabbitMQ
 - Doctrine ORM + migrations
@@ -31,7 +31,7 @@ The goal is to provide a **production‑like environment** for local development
 - `docker/`
   - `php/` – PHP‑FPM Dockerfile and configs (`php.ini`, `php-fpm.conf`, `www.conf`, `xdebug.ini`)
   - `nginx/` – Nginx config + vhost
-  - `postgres/` – tuned `postgresql.conf`, queries for exporter, `init.sql` (pg_stat_statements)
+  - `postgres/` – tuned `postgresql.conf`, queries for exporter, `init.sql` (pg_stat_statements, Citus)
   - `prometheus/` – Prometheus configuration (scraping app exporters)
   - `grafana/` – provisioned datasources and dashboards (HTTP, Redis, RabbitMQ)
   - `loki/` – Loki configuration
@@ -58,11 +58,17 @@ Defined in `docker-compose.yml`:
   - Listens on port `8080` in the container
   - Exposed as `APP_HTTP_PORT` (default `8080`) on the host
   - Access log in JSON to stdout (used by Loki)
-- `db` – PostgreSQL 16 (Alpine)
-  - Data volume: `db-data`
-  - Tuned with `docker/postgres/postgresql.conf`
-  - `pg_stat_statements` enabled via `init.sql`
-  - Healthcheck via `pg_isready`
+- Citus cluster (PostgreSQL‑based sharding):
+  - `db` – Citus coordinator node
+    - Data volume: `db-data`
+    - Tuned with `docker/postgres/postgresql.conf`
+    - `pg_stat_statements` and `citus` extensions enabled via `docker/postgres/init.sql`
+    - Регистрирует воркеры через `citus_add_node('db-worker1', 5432)` и `citus_add_node('db-worker2', 5432)`
+    - Healthcheck via `pg_isready`
+  - `db-worker1`, `db-worker2` – Citus worker nodes
+    - Собственные data‑volume (`db-worker1-data`, `db-worker2-data`)
+    - Тот же конфиг `postgresql.conf`
+    - Расширения `pg_stat_statements` и `citus` включаются через `docker/postgres/init-worker.sql`
 - `redis` – Redis 7 (Alpine)
   - `maxmemory` taken from `APP_REDIS_MEMORY_LIMIT`
 - `rabbitmq` – RabbitMQ 3 management
@@ -98,7 +104,9 @@ DATABASE_URL="postgresql://app:app@db:5432/app?serverVersion=16&charset=utf8"
 - Migrations:
   - Config: `app/config/packages/doctrine_migrations.yaml`
     - `organize_migrations: BY_YEAR_AND_MONTH`
-  - Example migration: `app/migrations/Version20250101000000.php` (creates `product` table)
+  - Example migrations:
+    - `app/migrations/Version20250101000000.php` – creates `product` table
+    - `app/migrations/Version20250102000000.php` – creates distributed `orders` table sharded by `user_id` using Citus
 
 ### Product entity & API
 
@@ -137,6 +145,62 @@ Routes:
     ```
   - On success: `201 Created` with created product.
   - On invalid payload: `400 Bad Request`.
+
+### Order entity & sharding with Citus
+
+Entity: `App\Entity\Order` (table `orders`)
+
+Fields:
+- `id` – integer, PK
+- `userId` – integer, **shard key** for Citus
+- `amount` – decimal(10, 2) (stored as string)
+- `status` – string (up to 50 chars)
+- `createdAt` – `DateTimeImmutable`
+- `updatedAt` – nullable `DateTimeImmutable`
+
+Sharding:
+- The `orders` table is converted to a **distributed Citus table** by migration `Version20250102000000.php`.
+- Shard key: `user_id` (логика — все заказы одного пользователя живут в одном шарде).
+- В миграции используется `create_distributed_table('orders', 'user_id', 'hash', 2)` — таким образом создаётся **2 шарда** для таблицы `orders`.
+
+Контроллер: `App\Controller\OrderController`
+
+Маршруты:
+
+- `POST /orders`
+  - Создаёт новый заказ:
+    ```json
+    { "userId": 1, "amount": 9.99, "status": "new" }
+    ```
+  - `status` необязателен, по умолчанию `"new"`.
+  - На успех: `201 Created` с созданным заказом.
+  - На невалидный payload (`userId`/`amount` не числовые): `400 Bad Request`.
+
+- `GET /orders?userId=...`
+  - Возвращает последние заказы конкретного пользователя (до 50 штук, сортировка по `id DESC`).
+  - Это **роутинг‑запрос** в Citus: по `user_id` попадает в один шард.
+
+- `GET /orders/summary`
+  - Возвращает агрегированную сумму заказов по пользователям:
+    ```json
+    [
+      { "userId": 1, "total": "99.90" },
+      { "userId": 2, "total": "10.00" }
+    ]
+    ```
+  - Это **распределённый запрос** (aggregation) по всем шардам.
+
+Полезный SQL для просмотра шардов (в psql внутри контейнера `db`):
+
+```sql
+SELECT
+  logicalrelid,
+  shardid,
+  shardminvalue,
+  shardmaxvalue
+FROM pg_dist_shard
+WHERE logicalrelid = 'orders'::regclass;
+```
 
 ### Messenger
 
@@ -287,6 +351,7 @@ Static analysis / code style (run inside PHP container via Docker):
 - `make phpstan` – runs PHPStan with `phpstan.neon.dist`
 - `make cs-fix` – runs PHP CS Fixer with `.php-cs-fixer.dist.php`
 - `make rector` – runs Rector with `rector.php`
+ - `make migrate` – runs Doctrine migrations inside PHP container
 
 Load testing:
 
@@ -319,8 +384,7 @@ Steps:
 3. Apply database migrations:
 
    ```bash
-   make php
-   php bin/console doctrine:migrations:migrate
+   make migrate
    ```
 
 4. Test the API:
@@ -356,4 +420,3 @@ You are expected to:
 - Extend Grafana dashboards and alerting rules for your use‑cases.
 
 Use this as a starting point for new Symfony API projects with Docker‑first, observability‑ready setup.
-

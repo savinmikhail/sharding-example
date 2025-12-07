@@ -1,7 +1,6 @@
 CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
 CREATE EXTENSION IF NOT EXISTS citus;
 
--- Allow the application user used by postgres-exporter to read stats
 DO
 $$
 BEGIN
@@ -13,6 +12,3 @@ $$;
 
 GRANT pg_read_all_stats TO app;
 
--- Register Citus workers in the cluster (hostnames are Docker service names)
-SELECT citus_add_node('db-worker1', 5432);
-SELECT citus_add_node('db-worker2', 5432);
