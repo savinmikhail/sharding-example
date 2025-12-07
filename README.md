@@ -1,110 +1,96 @@
-# Symfony 7.3 Docker Template (API‑only)
+# Демонстрация шардирования PostgreSQL через Citus + Symfony
 
-This repository is a **template** for Symfony 7.3 API services running in Docker with a full set of infrastructure:
+Этот репозиторий — простой, но “живой” пример того, как:
 
-- PHP‑FPM 8.4 (Alpine) with Symfony 7.3 (API‑only skeleton)
-- Nginx as HTTP entrypoint
-- Citus (PostgreSQL‑based sharding)
-- Redis
-- RabbitMQ
-- Doctrine ORM + migrations
-- Symfony Messenger (Doctrine transports + failure transport)
-- Observability stack: Prometheus, Grafana, Loki, Promtail, exporters
-- k6 for HTTP load testing
+- поднять кластер PostgreSQL с шардированием на базе **Citus** (координатор + 2 воркера);
+- прозрачно работать с этим кластером из приложения на **Symfony 7.3** через Doctrine, как будто это обычная одна база;
+- посмотреть, как строки распределяются по шардам и как выполняются распределённые запросы.
 
-The goal is to provide a **production‑like environment** for local development and experiments with metrics, logging and messaging.
+Symfony‑приложение **ничего не знает о шардах**: в `DATABASE_URL` указан обычный хост `db`, Doctrine работает с одной БД `app`.  
+Шардированием занимается только Citus на стороне PostgreSQL.
 
 ---
 
-## Docker stack
+## Архитектура и стек
 
-Defined in `docker-compose.yml`:
+Все сервисы описаны в `docker-compose.yml`:
 
-- `php` – PHP 8.4 FPM (Alpine)
-  - Built from `docker/php/Dockerfile`
-  - Uses `install-php-extensions` (intl, opcache, pdo_pgsql, zip, xdebug in dev)
-  - Runs as `www-data`, working dir `/var/www/app`
-  - Mounts `./app` as project root
-- `nginx` – Nginx 1.27 (Alpine)
-  - Configured via `docker/nginx/nginx.conf` and `docker/nginx/conf.d/app.conf`
-  - Listens on port `8080` in the container
-  - Exposed as `APP_HTTP_PORT` (default `8080`) on the host
-  - Access log in JSON to stdout (used by Loki)
-- Citus cluster (PostgreSQL‑based sharding):
-  - `db` – Citus coordinator node
-    - Data volume: `db-data`
-    - Tuned with `docker/postgres/postgresql.conf`
-    - `pg_stat_statements` and `citus` extensions enabled via `docker/postgres/init.sql`
-    - Регистрирует воркеры через `citus_add_node('db-worker1', 5432)` и `citus_add_node('db-worker2', 5432)`
-    - Healthcheck via `pg_isready`
-  - `db-worker1`, `db-worker2` – Citus worker nodes
-    - Собственные data‑volume (`db-worker1-data`, `db-worker2-data`)
-    - Тот же конфиг `postgresql.conf`
-    - Расширения `pg_stat_statements` и `citus` включаются через `docker/postgres/init-worker.sql`
-- `redis` – Redis 7 (Alpine)
-  - `maxmemory` taken from `APP_REDIS_MEMORY_LIMIT`
-- `rabbitmq` – RabbitMQ 3 management
-  - Default user/pass: `app/app`
-  - Ports:
-    - AMQP: `APP_RABBITMQ_PORT` (default `5672`)
-    - Management UI: `APP_RABBITMQ_MGMT_PORT` (default `15672`)
-- Exporters & observability
-  - `postgres-exporter` – PostgreSQL metrics (Prometheus)
-  - `redis-exporter` – Redis metrics (`oliver006/redis_exporter`)
-  - `rabbitmq-exporter` – RabbitMQ metrics (`kbudde/rabbitmq-exporter`)
-  - `prometheus` – metrics storage (`docker/prometheus/prometheus.yml`)
-  - `grafana` – dashboards (Redis, RabbitMQ, HTTP, etc.)
-  - `loki` – log storage
-  - `promtail` – collects Docker logs → Loki
-- `k6` – Grafana k6 image for load testing
+- `php` — PHP‑FPM 8.4 + Symfony 7.3 (API‑приложение).
+- `nginx` — фронтовой HTTP‑сервер.
+- **Citus кластер (PostgreSQL)**:
+  - `db` — координатор (PostgreSQL с расширением `citus`).
+  - `db-worker1`, `db-worker2` — два воркера (PostgreSQL с `citus`).
+- Дополнительно (для полноты инфраструктуры, но не обязательно для понимания шардирования):
+  - `redis`, `rabbitmq`.
+  - `postgres-exporter`, `redis-exporter`, `rabbitmq-exporter`.
+  - `prometheus`, `grafana`, `loki`, `promtail`.
+  - `k6` — нагрузочное тестирование HTTP.
+
+Кластеры Citus настраиваются через файлы в `docker/postgres/`:
+
+- `postgresql.conf` — общий тюнинг PostgreSQL + `shared_preload_libraries = 'citus,pg_stat_statements'`.
+- `init.sql` — инициализация координатора:
+  - `CREATE EXTENSION citus;`
+  - регистрация воркеров:
+    - `SELECT citus_add_node('db-worker1', 5432);`
+    - `SELECT citus_add_node('db-worker2', 5432);`
+- `init-worker.sql` — инициализация воркеров (расширения и пользователь `app`).
 
 ---
 
-### Order entity & sharding with Citus
+## Как шардируется таблица `orders`
 
-Entity: `App\Entity\Order` (table `orders`)
+### Сущность Order
 
-Fields:
-- `id` – integer, PK
-- `userId` – integer, **shard key** for Citus
-- `amount` – decimal(10, 2) (stored as string)
-- `status` – string (up to 50 chars)
-- `createdAt` – `DateTimeImmutable`
-- `updatedAt` – nullable `DateTimeImmutable`
+В Symfony‑приложении есть сущность `App\Entity\Order`, которая мапится на таблицу `orders`:
 
-Sharding:
-- The `orders` table is converted to a **distributed Citus table** by migration `Version20250102000000.php`.
-- Shard key: `user_id` (логика — все заказы одного пользователя живут в одном шарде).
-- В миграции используется `create_distributed_table('orders', 'user_id', 'hash', 2)` — таким образом создаётся **2 шарда** для таблицы `orders`.
+- `id` — идентификатор заказа.
+- `userId` — идентификатор пользователя (**ключ шардирования**).
+- `amount` — сумма (NUMERIC).
+- `status` — статус.
+- `createdAt` / `updatedAt` — даты.
 
-Контроллер: `App\Controller\OrderController`
+### Миграция
 
-Маршруты:
+Миграция `app/migrations/Version20250102000000.php`:
 
-- `POST /orders`
-  - Создаёт новый заказ:
-    ```json
-    { "userId": 1, "amount": 9.99, "status": "new" }
-    ```
-  - `status` необязателен, по умолчанию `"new"`.
-  - На успех: `201 Created` с созданным заказом.
-  - На невалидный payload (`userId`/`amount` не числовые): `400 Bad Request`.
+1. Создаёт обычную PostgreSQL‑таблицу:
 
-- `GET /orders?userId=...`
-  - Возвращает последние заказы конкретного пользователя (до 50 штук, сортировка по `id DESC`).
-  - Это **роутинг‑запрос** в Citus: по `user_id` попадает в один шард.
+   ```sql
+   CREATE TABLE orders (
+       id SERIAL NOT NULL,
+       user_id INT NOT NULL,
+       amount NUMERIC(10, 2) NOT NULL,
+       status VARCHAR(50) NOT NULL,
+       created_at TIMESTAMP(0) WITHOUT TIME ZONE NOT NULL,
+       updated_at TIMESTAMP(0) WITHOUT TIME ZONE DEFAULT NULL
+   );
 
-- `GET /orders/summary`
-  - Возвращает агрегированную сумму заказов по пользователям:
-    ```json
-    [
-      { "userId": 1, "total": "99.90" },
-      { "userId": 2, "total": "10.00" }
-    ]
-    ```
-  - Это **распределённый запрос** (aggregation) по всем шардам.
+   CREATE INDEX idx_orders_user_id ON orders(user_id);
+   ```
 
-Полезный SQL для просмотра шардов (в psql внутри контейнера `db`):
+   Обрати внимание: **нет PRIMARY KEY** — Citus не разрешает делать распределённой таблицу с PK/UNIQUE, в которых нет колонки шардирования.
+
+2. Включает расширение Citus (на случай, если оно ещё не создано):
+
+   ```sql
+   CREATE EXTENSION IF NOT EXISTS citus;
+   ```
+
+3. Говорит Citus, что таблицу нужно шардировать по `user_id` и создать 2 шарда:
+
+   ```sql
+   SET citus.shard_count TO 2;
+   SELECT create_distributed_table('orders', 'user_id');
+   ```
+
+### Принцип шардирования
+
+- Шард‑ключ: `user_id`.
+- Citus использует **hash‑шардирование** по значению `user_id`.
+- В конфигурации `citus.shard_count = 2` для таблицы `orders` создаются **2 шарда**, которые Citus размещает на двух воркерах.
+
+Типичный вид шардов (можно посмотреть из `psql` на координаторе):
 
 ```sql
 SELECT
@@ -116,83 +102,228 @@ FROM pg_dist_shard
 WHERE logicalrelid = 'orders'::regclass;
 ```
 
-### Sharding demo command
+Пример (похож на то, что получится у тебя):
 
-To quickly verify that Citus sharding works end‑to‑end from Symfony:
+```text
+ logicalrelid | shardid |  shardminvalue  |  shardmaxvalue
+--------------+---------+-----------------+-----------------
+ orders       | 102008  | -2147483648     | -1
+ orders       | 102009  | 0               | 2147483647
+```
 
-- Generate demo data and see shard layout:
-
-  ```bash
-  make php
-  php bin/console app:sharding-demo --truncate --users=4 --orders-per-user=5
-  ```
-
-  The command will:
-
-  - Show Citus nodes (`pg_dist_node`).
-  - Show `orders` table shards and their placements (`pg_dist_shard` / `pg_dist_placement`).
-  - Insert demo orders via Doctrine ORM for a few `userId` values (writes go through the coordinator and are sharded by Citus).
-  - Run an aggregated query via `OrderRepository::getTotalAmountByUser()` (distributed query).
-  - Print which shard each `userId` would be routed to (if `get_shard_id_for_distribution_column` is available in this Citus version).
+Интервалы здесь — диапазоны хеш‑значений (для `integer`), а не “прямые” `user_id`.  
+Для демонстрации важно другое: **все заказы одного `user_id` гарантированно оказываются в одном шарде**.
 
 ---
 
-## Makefile commands
+## Что знает Symfony‑приложение
 
-From the repository root:
+### Подключение к БД
 
-- Start stack:
-  - `make up`
-  - App URL is printed (uses `APP_HTTP_PORT` from `.env`)
-- Rebuild only PHP container:
-  - `make php-rebuild`
-- Shell inside PHP container:
-  - `make php`
+В `app/.env`:
 
-Static analysis / code style (run inside PHP container via Docker):
+```dotenv
+DATABASE_URL="postgresql://app:app@db:5432/app?serverVersion=16&charset=utf8"
+```
 
-- `make phpstan` – runs PHPStan with `phpstan.neon.dist`
-- `make cs-fix` – runs PHP CS Fixer with `.php-cs-fixer.dist.php`
-- `make rector` – runs Rector with `rector.php`
- - `make migrate` – runs Doctrine migrations inside PHP container
+Важно:
 
-Load testing:
+- приложение знает только один хост `db` и одну БД `app`;
+- никакой специальной логики под Citus в коде **нет**;
+- Doctrine ORM работает как с обычным PostgreSQL, а Citus прозрачно маршрутизирует запросы.
 
-- `make k6` – runs k6 with `docker/k6/load.js` against the running stack.
+### API поверх шардированной таблицы
+
+Для наглядности поверх `orders` есть простой контроллер `App\Controller\OrderController`:
+
+- `POST /orders`
+  - создаёт заказ:
+    ```json
+    { "userId": 1, "amount": 9.99, "status": "new" }
+    ```
+  - `status` необязателен, по умолчанию `"new"`.
+
+- `GET /orders?userId=...`
+  - возвращает последние заказы конкретного пользователя (до 50 штук, сортировка по `id DESC`);
+  - с точки зрения Citus это **роутинг‑запрос**: ходит только в один шард, где живёт `user_id`.
+
+- `GET /orders/summary`
+  - возвращает сумму заказов по пользователям:
+    ```json
+    [
+      { "userId": 1, "total": "99.90" },
+      { "userId": 2, "total": "10.00" }
+    ]
+    ```
+  - это **распределённый запрос** — Citus собирает данные со всех шардов.
+
+Вся работа с БД идёт через Doctrine (`OrderRepository`), никакого SQL с `citus_*` в коде приложения нет.
 
 ---
 
-## Getting started
+## Команда для демонстрации шардирования
 
-Prerequisites:
+Главный инструмент — консольная команда `app:sharding-demo` (`app/src/Command/ShardingDemoCommand.php`).
 
-- Docker + Docker Compose
-- Make (optional but recommended)
+Запуск (из корня проекта):
 
-Steps:
+```bash
+make up
+make migrate
+make php
 
-1. Clone the repo:
+php bin/console app:sharding-demo --truncate --users=10 --orders-per-user=5
+```
 
-   ```bash
-   git clone <this-repo-url>
-   cd symfony-template-docker
+Опции:
+
+- `--truncate` — очистить `orders` перед генерацией.
+- `--users` — сколько разных `userId` использовать.
+- `--orders-per-user` — сколько заказов создавать на каждого пользователя.
+
+Команда делает несколько шагов:
+
+1. Показывает Citus‑ноды (`pg_dist_node`):
+
+   ```text
+   Citus nodes (pg_dist_node)
+   --------------------------
+
+   ------------ ------ ---------
+    Node         Port   Role
+   ------------ ------ ---------
+    db-worker1   5432   primary
+    db-worker2   5432   primary
+   ------------ ------ ---------
    ```
 
-2. Start the stack:
+2. Показывает шардирование таблицы `orders` и на каких нодах лежат шарды:
 
-   ```bash
-   make up
+   ```text
+   Orders table shards (pg_dist_shard / pg_dist_placement)
+   -------------------------------------------------------
+
+   ---------- ------------- ------------ ------------ ------
+    Shard ID   Min value     Max value    Node         Port
+   ---------- ------------- ------------ ------------ ------
+    102008     -2147483648   -1           db-worker1   5432
+    102009     0             2147483647   db-worker2   5432
+   ---------- ------------- ------------ ------------ ------
    ```
 
-3. Apply database migrations:
+3. Генерирует данные через Doctrine (приложение пишет в координатор, а Citus распределяет записи по воркерам):
 
-   ```bash
-   make migrate
+   ```text
+   Generating demo orders: 10 users × 5 orders
+   ------------------------------------------
+
+   [OK] Demo orders generated via Doctrine ORM (coordinator will route writes to shards).
    ```
 
-4. Test the sharding:
+4. Выполняет агрегирующий запрос через `OrderRepository::getTotalAmountByUser()` — распределённый `SELECT`:
 
-   ```bash
-   make php
-   php bin/console app:sharding-demo --truncate --users=4 --orders-per-user=5
+   ```text
+   Aggregated totals per user (distributed query)
+   ----------------------------------------------
+
+   --------- --------------
+    User ID   Total amount
+   --------- --------------
+    1         224.93
+    2         246.24
+    3         217.29
+    4         224.10
+    5         148.86
+    6         292.59
+    7         223.31
+    8         345.22
+    9         244.43
+    10        189.37
+   --------- --------------
    ```
+
+5. Показывает, какой `userId` попал в какой шард (через `get_shard_id_for_distribution_column`), отсортировано по `Shard ID`:
+
+   ```text
+   User-to-shard mapping (which shard each userId goes to)
+   -------------------------------------------------------
+
+   --------- ----------
+    User ID   Shard ID
+   --------- ----------
+    1         102008
+    3         102008
+    4         102008
+    5         102008
+    7         102008
+    8         102008
+    10        102008
+    2         102009
+    6         102009
+    9         102009
+   --------- ----------
+   ```
+
+Так хорошо видно:
+
+- есть 2 шарда (`102008`, `102009`);
+- пользователи распределены по ним;
+- приложение при этом не знает ни про `shardid`, ни про воркеров.
+
+---
+
+## Запуск проекта “с нуля”
+
+Требования:
+
+- Docker + Docker Compose.
+- `make`.
+
+Шаги:
+
+```bash
+git clone <this-repo-url>
+cd sharding-example
+
+make up
+make migrate
+```
+
+Демо шардирования:
+
+```bash
+make php
+php bin/console app:sharding-demo --truncate --users=10 --orders-per-user=5
+```
+
+---
+
+## Полезные команды Makefile
+
+Из корня репозитория:
+
+- `make up` — поднять весь стек.
+- `make php-rebuild` — пересобрать только PHP‑контейнер.
+- `make php` — зайти в PHP‑контейнер (`bash`).
+- `make migrate` — выполнить Doctrine‑миграции.
+- `make phpstan` — PHPStan.
+- `make cs-fix` — PHP CS Fixer.
+- `make rector` — Rector.
+- `make k6` — запустить k6‑скрипт для нагрузки на `/products`.
+
+---
+
+## Наблюдаемость (опционально)
+
+Если интересно ещё и посмотреть на метрики/логи:
+
+- Prometheus: `http://localhost:9090`
+- Grafana: `http://localhost:3000` (логин/пароль `admin/admin`)
+- Логи через Loki видны в Grafana → Explore (HTTP‑логи Nginx, логи PHP и т.д.).
+
+Но основной фокус этого репозитория — **простая демонстрация шардирования PostgreSQL через Citus** и работающего поверх этого Symfony‑приложения, которое об этих шардах не знает.  
+Дальше можно:
+
+- усложнять схему шардирования;
+- добавлять другие шард‑ключи;
+- экспериментировать с кросс‑шардовыми транзакциями и запросами.
