@@ -285,6 +285,20 @@ SQL);
             return;
         }
 
+        usort(
+            $rows,
+            static function (array $left, array $right): int {
+                $leftShard = (int) $left['shardId'];
+                $rightShard = (int) $right['shardId'];
+
+                if ($leftShard === $rightShard) {
+                    return (int) $left['userId'] <=> (int) $right['userId'];
+                }
+
+                return $leftShard <=> $rightShard;
+            },
+        );
+
         $io->table(
             ['User ID', 'Shard ID'],
             array_map(
