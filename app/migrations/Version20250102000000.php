@@ -23,18 +23,19 @@ CREATE TABLE orders (
     amount NUMERIC(10, 2) NOT NULL,
     status VARCHAR(50) NOT NULL,
     created_at TIMESTAMP(0) WITHOUT TIME ZONE NOT NULL,
-    updated_at TIMESTAMP(0) WITHOUT TIME ZONE DEFAULT NULL,
-    PRIMARY KEY(id)
+    updated_at TIMESTAMP(0) WITHOUT TIME ZONE DEFAULT NULL
 )
 SQL);
+
+        // Optional: index to speed up lookups by user_id
+        $this->addSql('CREATE INDEX idx_orders_user_id ON orders(user_id)');
 
         // Ensure Citus extension is available (for existing clusters where init.sql was not executed)
         $this->addSql('CREATE EXTENSION IF NOT EXISTS citus');
 
-        // Make orders a distributed table in Citus with user_id as shard key and 2 shards
-        $this->addSql(<<<'SQL'
-SELECT create_distributed_table('orders', 'user_id', 'hash', 2)
-SQL);
+        // Use 2 shards for this session and make orders a distributed table in Citus with user_id as shard key
+        $this->addSql("SET citus.shard_count TO 2");
+        $this->addSql("SELECT create_distributed_table('orders', 'user_id')");
     }
 
     public function down(Schema $schema): void

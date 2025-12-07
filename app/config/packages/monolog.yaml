@@ -6,10 +6,24 @@ when@dev:
     monolog:
         handlers:
             main:
-                type: stream
-                path: php://stdout
-                level: debug
-                channels: ["!event"]
+                formatter: 'monolog.formatter.json'
+                type: rotating_file
+                max_files: 1
+                action_level: info
+                path: "%kernel.logs_dir%/%kernel.environment%.log"
+                buffer_size: 1
+                channels:
+                    - "!cache"
+                    - "!deprecation"
+                    - "!doctrine"
+                    - "!http_client"
+                    - "!event"
+                    - "!messenger"
+                    - "!php"
+                    - "!request"
+                    - "!security"
+                    - "!translation"
+                    - "!lock"
             console:
                 type: console
                 process_psr_3_messages: false
