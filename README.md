@@ -20,11 +20,6 @@ Symfony‑приложение **ничего не знает о шардах**:
 - **Citus кластер (PostgreSQL)**:
   - `db` — координатор (PostgreSQL с расширением `citus`).
   - `db-worker1`, `db-worker2` — два воркера (PostgreSQL с `citus`).
-- Дополнительно (для полноты инфраструктуры, но не обязательно для понимания шардирования):
-  - `redis`, `rabbitmq`.
-  - `postgres-exporter`, `redis-exporter`, `rabbitmq-exporter`.
-  - `prometheus`, `grafana`, `loki`, `promtail`.
-  - `k6` — нагрузочное тестирование HTTP.
 
 Кластеры Citus настраиваются через файлы в `docker/postgres/`:
 
@@ -168,9 +163,7 @@ DATABASE_URL="postgresql://app:app@db:5432/app?serverVersion=16&charset=utf8"
 Запуск (из корня проекта):
 
 ```bash
-make up
-make migrate
-make php
+make up migrate php
 
 php bin/console app:sharding-demo --truncate --users=10 --orders-per-user=5
 ```
@@ -434,15 +427,7 @@ php bin/console app:sharding-demo --truncate --users=10 --orders-per-user=5
 
 ---
 
-## Наблюдаемость (опционально)
-
-Если интересно ещё и посмотреть на метрики/логи:
-
-- Prometheus: `http://localhost:9090`
-- Grafana: `http://localhost:3000` (логин/пароль `admin/admin`)
-- Логи через Loki видны в Grafana → Explore (HTTP‑логи Nginx, логи PHP и т.д.).
-
-Но основной фокус этого репозитория — **простая демонстрация шардирования PostgreSQL через Citus** и работающего поверх этого Symfony‑приложения, которое об этих шардах не знает.  
+Основной фокус этого репозитория — **простая демонстрация шардирования PostgreSQL через Citus** и работающего поверх этого Symfony‑приложения, которое об этих шардах не знает.  
 Дальше можно:
 
 - усложнять схему шардирования;
