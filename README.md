@@ -314,7 +314,7 @@ php bin/console app:sharding-demo --truncate --users=10 --orders-per-user=5
 
 ```bash
 make php
-php bin/console app:directory-sharding-products --truncate --products=50 --hot-ratio=0.2
+php bin/console app:directory-sharding-products --truncate --products=20 --hot-ratio=0.3
 ```
 
 Опции:
@@ -412,20 +412,6 @@ php bin/console app:sharding-demo --truncate --users=10 --orders-per-user=5
 
 ---
 
-## Полезные команды Makefile
-
-Из корня репозитория:
-
-- `make up` — поднять весь стек.
-- `make php-rebuild` — пересобрать только PHP‑контейнер.
-- `make php` — зайти в PHP‑контейнер (`bash`).
-- `make migrate` — выполнить Doctrine‑миграции.
-- `make phpstan` — PHPStan.
-- `make cs-fix` — PHP CS Fixer.
-- `make rector` — Rector.
-- `make k6` — запустить k6‑скрипт для нагрузки на `/products`.
-
----
 
 Основной фокус этого репозитория — **простая демонстрация шардирования PostgreSQL через Citus** и работающего поверх этого Symfony‑приложения, которое об этих шардах не знает.  
 Дальше можно:
