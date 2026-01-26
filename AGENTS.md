@@ -1,1 +1,1 @@
-Хочу для symfony + postgresql + citus создать простой пример шардирования 
+Простой пример хэш и directory based шардирования для стека symfony + postgresql + citus
